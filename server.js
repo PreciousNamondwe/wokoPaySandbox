@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 // Start settlement checker (every 3 minutes)
 let settlementInterval;
 function startSettlementChecker() {
-  console.log('⏰ Starting settlement checker (every 3 minutes)');
+  console.log('Starting settlement checker (every 3 minutes)');
   
   const checkSettlement = async () => {
     try {
@@ -16,7 +16,7 @@ function startSettlementChecker() {
       const summary = await settlementService.getSettlementSummary();
       
       if (summary.unsettledCount > 0) {
-        console.log('\n📊 SETTLEMENT LEDGER CHECK:');
+        console.log('\n SETTLEMENT LEDGER CHECK:');
         console.log(`   Unsettled transactions: ${summary.unsettledCount}`);
         console.log(`   Net settlement: ${summary.netSettlement.amount} ZMW ${summary.netSettlement.direction}`);
         console.log(`   Action: ${summary.netSettlement.description}`);

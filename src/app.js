@@ -2,15 +2,22 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+
 import { transferService } from './services/transfer.service.js';
 import { settlementService } from './services/settlement.service.js';
 import { db } from './db/database.js';
+
+import {
+  registerDeveloper,
+  loginDeveloper,
+  rotateKeys
+} from "./auth/developer.auth.js";
+import { validateApiKey } from "./auth/apiKey.middleware.js";
 
 dotenv.config();
 
 const app = express();
 
-// Middleware
 app.use(helmet());
 app.use(cors({
   origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:5173'],
@@ -19,13 +26,13 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Request logging
+
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
   next();
 });
 
-// Health check
+
 app.get('/', (req, res) => {
   res.json({
     service: 'WokoPay API',
@@ -39,13 +46,21 @@ app.get('/', (req, res) => {
       history: 'GET /api/settlement/history',
       users: 'GET /api/users',
       merchants: 'GET /api/merchants',
-      transactions: 'GET /api/transactions'
+      transactions: 'GET /api/transactions',
+      dev_register: "POST /api/dev/register",
+      dev_login: "POST /api/dev/login",
+      dev_rotate_keys: "POST /api/dev/keys/rotate"
     }
   });
 });
 
-// Send money
-app.post('/api/send', async (req, res) => {
+
+app.post("/api/dev/register", registerDeveloper);
+app.post("/api/dev/login", loginDeveloper);
+app.post("/api/dev/keys/rotate", rotateKeys);
+
+
+app.post('/api/send', validateApiKey, async (req, res) => {
   try {
     const result = await transferService.processTransfer(req.body);
     res.json(result);
@@ -58,7 +73,7 @@ app.post('/api/send', async (req, res) => {
   }
 });
 
-// Settlement endpoints
+
 app.get('/api/settlement/ledger', async (req, res) => {
   try {
     const summary = await settlementService.getSettlementSummary();
@@ -120,7 +135,7 @@ app.post('/api/settlement/mark-settled', async (req, res) => {
   }
 });
 
-// System endpoints
+
 app.get('/api/users', async (req, res) => {
   try {
     const users = await db.getUsers();
@@ -169,7 +184,7 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
-// 404 handler
+
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -177,7 +192,8 @@ app.use('*', (req, res) => {
   });
 });
 
-// Error handler
+
+
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
