@@ -30,7 +30,7 @@ app.use(cors({
   origin: function (origin, callback) {
     const allowed = [
       "http://localhost:3000",
-      "http://localhost:5173",
+      "https://woko-sandbox.vercel.app",
       "https://wokopaysandbox.onrender.com"
     ];
 
