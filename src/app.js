@@ -26,32 +26,36 @@ app.use(
   })
 );
 
-const allowed = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",")
-  : ["http://localhost:3000", "http://localhost:5173"];
+app.use(cors({
+  origin: function (origin, callback) {
+    const allowed = [
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "https://wokopaysandbox.onrender.com"
+    ];
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (allowed.includes(origin)) return callback(null, true);
+    // Allow server-to-server or no-origin requests
+    if (!origin) return callback(null, true);
 
-      console.log("❌ CORS BLOCKED:", origin);
-      return callback(new Error("CORS not allowed"), false);
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "x-api-key",
-      "x-secret-key",
-      "Authorization",
-      "Accept",
-    ],
-    credentials: true,
-    preflightContinue: false,
-    optionsSuccessStatus: 200
-  })
-);
+    if (allowed.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.log("CORS BLOCKED:", origin);
+    return callback(new Error("CORS not allowed"));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "x-api-key",
+    "x-secret-key",
+    "Authorization"
+  ],
+}));
+
+// Required for preflight
+app.options("*", cors());
 
 app.options("*", cors());
 
