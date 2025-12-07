@@ -18,27 +18,42 @@ dotenv.config();
 
 const app = express();
 
-app.use(helmet());
-app.use(cors({
-  origin: (origin, callback) => {
-    const allowed = process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(",")
-      : ["http://localhost:3000", "http://localhost:5173"];
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
-    // Allow server-to-server requests with no origin
-    if (!origin) return callback(null, true);
+const allowed = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : ["http://localhost:3000", "http://localhost:5173"];
 
-    if (allowed.includes(origin)) {
-      return callback(null, true);
-    } else {
-      console.log("CORS BLOCKED:", origin);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowed.includes(origin)) return callback(null, true);
+
+      console.log("❌ CORS BLOCKED:", origin);
       return callback(new Error("CORS not allowed"), false);
-    }
-  },
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "x-api-key", "x-secret-key"],
-  credentials: true,
-}));
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "x-api-key",
+      "x-secret-key",
+      "Authorization",
+      "Accept",
+    ],
+    credentials: true,
+    preflightContinue: false,
+    optionsSuccessStatus: 200
+  })
+);
+
+app.options("*", cors());
 
 app.use(express.json());
 
