@@ -1,11 +1,16 @@
 # render.yaml
 services:
   - type: web
-    name: express-api
+    name: wokopay-api
     env: node
     buildCommand: npm install
-    startCommand: node server.js
-    healthCheckPath: /health
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 3000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false

@@ -1,196 +1,271 @@
-import { db } from '../db/database.js';
+// src/services/transfer.service.js
+const supabase = require('../db/database');
+const { v4: uuidv4 } = require('uuid');
 
-export class TransferService {
-  
-  async calculateTransfer(amount, fromCurrency, toCurrency) {
-    const rates = await db.getExchangeRates();
-    
-    let exchangeRate, convertedAmount;
-    
-    if (fromCurrency === 'MWK' && toCurrency === 'ZMW') {
-      exchangeRate = rates.MWK_ZMW || 0.03;
-      convertedAmount = amount * exchangeRate;
-    } else if (fromCurrency === 'ZMW' && toCurrency === 'MWK') {
-      exchangeRate = rates.ZMW_MWK || 33.33;
-      convertedAmount = amount * exchangeRate;
-    } else {
-      throw new Error('Unsupported currency pair');
+class TransferService {
+  async sendCrossBorder(senderUserId, recipientPhone, amount, fromCurrency, purpose = '') {
+    // Get sender info
+    const { data: sender, error: senderError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', senderUserId)
+      .single();
+
+    if (senderError) throw new Error('Sender not found');
+    if (!sender.is_active) throw new Error('Sender account is inactive');
+
+    // Get sender's primary wallet
+    const { data: senderWallet, error: walletError } = await supabase
+      .from('wokopay_wallets')
+      .select('*')
+      .eq('user_id', senderUserId)
+      .eq('is_primary', true)
+      .single();
+
+    if (walletError) throw new Error('Sender wallet not found');
+    if (parseFloat(senderWallet.available_balance) < parseFloat(amount)) {
+      throw new Error('Insufficient balance');
     }
-    
-    // Calculate fees (1.5% or minimum 100)
-    const feePercentage = 1.5;
-    const minFee = 100;
-    const fee = Math.max(amount * (feePercentage / 100), minFee);
-    const totalAmount = amount + fee;
-    
+
+    // Check if sender is traveling
+    if (sender.is_traveling && sender.current_country) {
+      // Use current country for FX
+      senderWallet.country_code = sender.current_country;
+    }
+
+    // Find recipient
+    const { data: recipient, error: recipientError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('phone_number', recipientPhone)
+      .eq('is_active', true)
+      .single();
+
+    if (recipientError) throw new Error('Recipient not found');
+
+    // Get recipient's primary wallet
+    const { data: recipientWallet, error: recipientWalletError } = await supabase
+      .from('wokopay_wallets')
+      .select('*')
+      .eq('user_id', recipient.id)
+      .eq('is_primary', true)
+      .single();
+
+    if (recipientWalletError) throw new Error('Recipient wallet not found');
+
+    // Check if recipient is traveling
+    if (recipient.is_traveling && recipient.current_country) {
+      recipientWallet.country_code = recipient.current_country;
+    }
+
+    // Get FX rate
+    const fxRate = await this.getFxRate(
+      senderWallet.currency,
+      recipientWallet.currency
+    );
+
+    // Calculate converted amount
+    const convertedAmount = parseFloat(amount) * fxRate;
+    const feeAmount = this.calculateFee(amount, senderWallet.country_code, recipientWallet.country_code);
+    const totalAmount = parseFloat(amount) + feeAmount;
+
+    // Deduct from sender wallet
+    const senderNewBalance = parseFloat(senderWallet.available_balance) - totalAmount;
+    await supabase
+      .from('wokopay_wallets')
+      .update({
+        available_balance: senderNewBalance,
+        last_transaction_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', senderWallet.id);
+
+    // Add to recipient wallet
+    const recipientNewBalance = parseFloat(recipientWallet.available_balance) + convertedAmount;
+    await supabase
+      .from('wokopay_wallets')
+      .update({
+        available_balance: recipientNewBalance,
+        last_transaction_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', recipientWallet.id);
+
+    // Update country accounts
+    await this.updateCountryAccounts(
+      senderWallet.country_code,
+      recipientWallet.country_code,
+      totalAmount,
+      convertedAmount
+    );
+
+    // Create transaction record
+    const transactionRef = `TRF${Date.now()}${uuidv4().slice(0, 8).toUpperCase()}`;
+    const { data: transaction, error: transactionError } = await supabase
+      .from('transactions')
+      .insert({
+        transaction_ref: transactionRef,
+        transaction_type: 'cross_border_send',
+        sender_user_id: senderUserId,
+        sender_wallet_id: senderWallet.id,
+        sender_phone: sender.phone_number,
+        sender_country: senderWallet.country_code,
+        sender_currency: senderWallet.currency,
+        recipient_user_id: recipient.id,
+        recipient_wallet_id: recipientWallet.id,
+        recipient_phone: recipient.phone_number,
+        recipient_country: recipientWallet.country_code,
+        recipient_currency: recipientWallet.currency,
+        amount: amount,
+        currency: senderWallet.currency,
+        fee_amount: feeAmount,
+        total_amount: totalAmount,
+        fx_rate: fxRate,
+        converted_amount: convertedAmount,
+        converted_currency: recipientWallet.currency,
+        status: 'completed',
+        description: `Cross-border transfer: ${purpose}`,
+        completed_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (transactionError) throw new Error('Failed to create transaction');
+
+    // Create audit logs
+    await Promise.all([
+      supabase.from('audit_logs').insert({
+        action_type: 'TRANSFER_SEND',
+        table_name: 'wokopay_wallets',
+        record_id: senderWallet.id,
+        old_values: { balance: senderWallet.available_balance },
+        new_values: { balance: senderNewBalance },
+        changed_by: senderUserId,
+        created_at: new Date().toISOString()
+      }),
+      supabase.from('audit_logs').insert({
+        action_type: 'TRANSFER_RECEIVE',
+        table_name: 'wokopay_wallets',
+        record_id: recipientWallet.id,
+        old_values: { balance: recipientWallet.available_balance },
+        new_values: { balance: recipientNewBalance },
+        changed_by: senderUserId,
+        created_at: new Date().toISOString()
+      })
+    ]);
+
+    // Create settlement instruction
+    await this.createSettlementInstruction(
+      transaction.id,
+      senderWallet.country_code,
+      recipientWallet.country_code,
+      totalAmount,
+      convertedAmount
+    );
+
     return {
-      exchangeRate,
-      convertedAmount: parseFloat(convertedAmount.toFixed(2)),
-      fee: parseFloat(fee.toFixed(2)),
-      totalAmount: parseFloat(totalAmount.toFixed(2)),
-      amount: parseFloat(amount),
-      sourceCurrency: fromCurrency,
-      destinationCurrency: toCurrency
+      success: true,
+      transactionId: transaction.id,
+      transactionRef: transaction.transaction_ref,
+      amountSent: amount,
+      currencySent: senderWallet.currency,
+      amountReceived: convertedAmount,
+      currencyReceived: recipientWallet.currency,
+      fxRate: fxRate,
+      fee: feeAmount,
+      timestamp: new Date().toISOString()
     };
   }
-  
-  async processTransfer(transferData) {
-    const {
-      senderId,
-      senderPhone,
-      recipientPhone,
-      amount,
-      fromCountry,
-      toCountry
-    } = transferData;
-    
-    console.log(`📤 Processing transfer: ${amount} from ${fromCountry} to ${toCountry}`);
-    
-    // Get sender
-    const sender = await db.getUserById(senderId);
-    if (!sender) throw new Error(`Sender with ID ${senderId} not found`);
-    
-    // Get or create recipient
-    let recipient = await db.getUserByPhone(recipientPhone);
-    if (!recipient) {
-      console.log(`👤 Creating new recipient: ${recipientPhone}`);
-      recipient = await db.createUser({
-        name: `User ${recipientPhone}`,
-        phone: recipientPhone,
-        country: toCountry,
-        currency: toCountry === 'MW' ? 'MWK' : 'ZMW',
-        balance: 0,
-        is_verified: false
-      });
+
+  async getFxRate(fromCurrency, toCurrency) {
+    if (fromCurrency === toCurrency) return 1.0;
+
+    const { data: fxRate, error } = await supabase
+      .from('exchange_rates')
+      .select('rate')
+      .eq('base_currency', fromCurrency)
+      .eq('target_currency', toCurrency)
+      .eq('is_active', true)
+      .gte('valid_from', new Date().toISOString())
+      .or(`valid_to.is.null,valid_to.gte.${new Date().toISOString()}`)
+      .order('valid_from', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !fxRate) {
+      // Fallback to mock rate (in production, use real FX API)
+      return 0.85; // Example: 1 USD = 0.85 EUR
     }
+
+    return parseFloat(fxRate.rate);
+  }
+
+  calculateFee(amount, fromCountry, toCountry) {
+    // Simple fee calculation logic
+    const baseFee = 5.00; // Base fee in currency
+    const percentageFee = 0.02; // 2%
     
-    // Calculate transfer
-    const fromCurrency = fromCountry === 'MW' ? 'MWK' : 'ZMW';
-    const toCurrency = toCountry === 'MW' ? 'MWK' : 'ZMW';
-    
-    const calculation = await this.calculateTransfer(amount, fromCurrency, toCurrency);
-    
-    // Check sender balance
-    if (sender.balance < calculation.totalAmount) {
-      throw new Error(`Insufficient balance. Available: ${sender.balance} ${fromCurrency}, Required: ${calculation.totalAmount} ${fromCurrency}`);
+    return baseFee + (parseFloat(amount) * percentageFee);
+  }
+
+  async updateCountryAccounts(fromCountry, toCountry, outgoingAmount, incomingAmount) {
+    // Update source country account (outgoing)
+    const { data: fromAccount } = await supabase
+      .from('wokopay_country_accounts')
+      .select('*')
+      .eq('country_code', fromCountry)
+      .single();
+
+    if (fromAccount) {
+      await supabase
+        .from('wokopay_country_accounts')
+        .update({
+          outgoing_pool: parseFloat(fromAccount.outgoing_pool) + parseFloat(outgoingAmount),
+          current_balance: parseFloat(fromAccount.current_balance) - parseFloat(outgoingAmount),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', fromAccount.id);
     }
-    
-    // Get merchants
-    const sourceMerchant = await db.getMerchantByCountry(fromCountry);
-    const destMerchant = await db.getMerchantByCountry(toCountry);
-    
-    if (!sourceMerchant || !destMerchant) {
-      throw new Error('Merchant account not found');
-    }
-    
-    // Check destination merchant balance
-    if (destMerchant.balance < calculation.convertedAmount) {
-      throw new Error(`Destination merchant has insufficient balance. Available: ${destMerchant.balance} ${toCurrency}, Required: ${calculation.convertedAmount} ${toCurrency}`);
-    }
-    
-    try {
-      console.log('💰 Starting transfer process...');
-      
-      // 1. Update sender balance
-      console.log(`💳 Deducting ${calculation.totalAmount} ${fromCurrency} from sender`);
-      const updatedSender = await db.updateUser(senderId, {
-        balance: sender.balance - calculation.totalAmount
-      });
-      
-      // 2. Update source merchant balance
-      console.log(`📈 Adding ${calculation.totalAmount} ${fromCurrency} to ${sourceMerchant.name}`);
-      await db.updateMerchant(sourceMerchant.id, {
-        balance: sourceMerchant.balance + calculation.totalAmount
-      });
-      
-      // 3. Update destination merchant balance (auto-payout)
-      console.log(`📉 Deducting ${calculation.convertedAmount} ${toCurrency} from ${destMerchant.name}`);
-      await db.updateMerchant(destMerchant.id, {
-        balance: destMerchant.balance - calculation.convertedAmount
-      });
-      
-      // 4. Update recipient balance
-      console.log(`💸 Adding ${calculation.convertedAmount} ${toCurrency} to recipient`);
-      const updatedRecipient = await db.updateUser(recipient.id, {
-        balance: recipient.balance + calculation.convertedAmount
-      });
-      
-      // 5. Create transaction record
-      console.log('📝 Creating transaction record...');
-      const transaction = await db.createTransaction({
-        sender_id: senderId,
-        sender_phone: senderPhone,
-        recipient_id: recipient.id,
-        recipient_phone: recipientPhone,
-        amount: calculation.amount,
-        from_country: fromCountry,
-        to_country: toCountry,
-        from_currency: fromCurrency,
-        to_currency: toCurrency,
-        exchange_rate: calculation.exchangeRate,
-        converted_amount: calculation.convertedAmount,
-        fee: calculation.fee,
-        status: 'completed',
-        payout_method: this.getRandomPayoutMethod(toCountry),
-        merchant_from: sourceMerchant.id,
-        merchant_to: destMerchant.id,
-        settled: false,
-        completed_at: new Date().toISOString()
-      });
-      
-      console.log(`✅ Transfer completed! Transaction ID: ${transaction.transaction_id}`);
-      
-      return {
-        success: true,
-        message: 'Transfer completed successfully',
-        transactionId: transaction.transaction_id,
-        amountSent: calculation.amount,
-        amountReceived: calculation.convertedAmount,
-        fee: calculation.fee,
-        exchangeRate: calculation.exchangeRate,
-        sender: {
-          id: senderId,
-          name: sender.name,
-          newBalance: updatedSender.balance,
-          currency: fromCurrency
-        },
-        recipient: {
-          id: recipient.id,
-          phone: recipientPhone,
-          newBalance: updatedRecipient.balance,
-          currency: toCurrency
-        },
-        merchantBalances: {
-          source: {
-            name: sourceMerchant.name,
-            newBalance: sourceMerchant.balance + calculation.totalAmount,
-            currency: fromCurrency
-          },
-          destination: {
-            name: destMerchant.name,
-            newBalance: destMerchant.balance - calculation.convertedAmount,
-            currency: toCurrency
-          }
-        },
-        status: 'completed',
-        timestamp: new Date().toISOString()
-      };
-      
-    } catch (error) {
-      console.error('❌ Transfer failed:', error);
-      throw new Error(`Transfer failed: ${error.message}`);
+
+    // Update destination country account (incoming)
+    const { data: toAccount } = await supabase
+      .from('wokopay_country_accounts')
+      .select('*')
+      .eq('country_code', toCountry)
+      .single();
+
+    if (toAccount) {
+      await supabase
+        .from('wokopay_country_accounts')
+        .update({
+          incoming_pool: parseFloat(toAccount.incoming_pool) + parseFloat(incomingAmount),
+          current_balance: parseFloat(toAccount.current_balance) + parseFloat(incomingAmount),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', toAccount.id);
     }
   }
-  
-  getRandomPayoutMethod(country) {
-    if (country === 'MW') {
-      const methods = ['Airtel Money Malawi', 'TNM Mpamba', 'Standard Bank Malawi', 'NBS Bank'];
-      return methods[Math.floor(Math.random() * methods.length)];
-    } else {
-      const methods = ['MTN Money Zambia', 'Airtel Money Zambia', 'Zanaco', 'Stanbic Bank Zambia'];
-      return methods[Math.floor(Math.random() * methods.length)];
-    }
+
+  async createSettlementInstruction(transactionId, fromCountry, toCountry, outgoingAmount, incomingAmount) {
+    const instructionRef = `STL${Date.now()}${uuidv4().slice(0, 8).toUpperCase()}`;
+    
+    await supabase
+      .from('payout_instructions')
+      .insert({
+        instruction_ref: instructionRef,
+        from_country: fromCountry,
+        to_country: toCountry,
+        amount: outgoingAmount,
+        currency: fromCountry, // Use country code as currency placeholder
+        converted_amount: incomingAmount,
+        converted_currency: toCountry, // Use country code as currency placeholder
+        payout_to_phone: 'system_settlement',
+        payout_method: 'net_settlement',
+        source_transaction_id: transactionId,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      });
   }
 }
 
-export const transferService = new TransferService();
+module.exports = new TransferService();
