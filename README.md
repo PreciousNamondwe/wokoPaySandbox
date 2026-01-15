@@ -1,7 +1,9 @@
 # WokoPay Wallet & Payout API – README
 
-## API Base URL
-wokopaysandbox.onrender.com
+## API Base URL Hosted
+https://wokopaysandbox.onrender.com
+
+## API Base URL  Local
 http://localhost:3000
 
 ## Wallet Load Flow
