@@ -1,10 +1,8 @@
 # WokoPay Wallet & Payout API – README
 
-## Overview
-WokoPay is a local-to-local digital wallet and settlement system designed for Africa (SADC), enabling users to load money from mobile money, hold value in wallets, travel, and send money cross-border without banks in the transaction loop.
-
 ## API Base URL
-http://localhost:3000/api
+wokopaysandbox.onrender.com
+http://localhost:3000
 
 ## Wallet Load Flow
 
@@ -61,14 +59,42 @@ curl -X POST http://localhost:3000/api/payout/execute \
     "isGuestPayout": false
   }'
 ```
+## Pay Bills
 
-## Profit Model
-- Wallet load fees
-- Payout fees
-- FX spread
-- Guest payout surcharge
+### Pay bills with wokpay account
+```bash
+curl -X POST http://localhost:3000/api/bills/pay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "655abc71-3e34-41fd-9488-8ca08075feae",
+    "billerCode": "ESCOM",
+    "customerAccountNumber": "123456789",
+    "amount": 15000,
+    "paymentMethod": "airtel_money"
+  }'
+```
+
+### Pay bills without wokpay account
+```bash
+curl -X POST http://localhost:3000/api/bills/pay-with-user \
+-H "Content-Type: application/json" \
+-d '{
+  "fullName": "Precious Namondwe",
+  "email": "precious@example.com",
+  "phoneNumber": "+265881234569",
+  "customerAccountNumber": "123456789",
+  "amount": 15000,
+  "paymentMethod": "airtel_money"
+}'
+
+```
+
+## GET methodz for bills
+```bash
+curl -X GET http://localhost:3000/api/bills/billers
+```
 
 ## Disclaimer
 This is a simulated fintech system for academic and architectural demonstration only.
 
-Author: WokoPay – Final Year Project
+Author: (Precious Nmaondwe)WokoPay – Final Year Project
