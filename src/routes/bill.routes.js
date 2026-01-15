@@ -90,23 +90,49 @@ router.post('/pay', async (req, res) => {
 
 router.post("/pay-with-user", async (req, res) => {
   try {
-    const { fullName, email, phoneNumber, customerAccountNumber, amount, paymentMethod, billerCode } = req.body;
+    const {
+      fullName,
+      email,
+      phoneNumber,
+      customerAccountNumber,
+      amount,
+      paymentMethod,
+      billerCode
+    } = req.body;
 
-    if (!fullName || !email || !phoneNumber || !customerAccountNumber || !amount || !paymentMethod) {
+    if (!fullName || !email || !phoneNumber || !customerAccountNumber || !amount || !paymentMethod || !billerCode) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 1. Check if user exists
+    // Detect Malawi mobile network
+    const detectedNetwork = detectMWNetwork(phoneNumber);
+    if (!detectedNetwork) return res.status(400).json({ error: "Invalid Malawi phone number" });
+    if ((paymentMethod === "airtel_money" && detectedNetwork !== "airtel") ||
+        (paymentMethod === "tnm_mpamba" && detectedNetwork !== "tnm")) {
+      return res.status(400).json({
+        error: `Phone number does not match selected payment method. Detected ${detectedNetwork.toUpperCase()} number.`
+      });
+    }
+
+    // 1. Get Malawi country account (for biller accounts & FK)
+    const { data: countryAccount } = await supabase
+      .from("wokopay_country_accounts")
+      .select("*")
+      .eq("country_code", "MW")
+      .single();
+    if (!countryAccount) throw new Error("Malawi country account not found");
+
+    // 2. Check or create user
     let { data: user } = await supabase
       .from("users")
       .select("*")
       .eq("phone_number", phoneNumber)
       .single();
 
-    let userId, walletId, providerId, wallet;
+    let userId, walletId, wallet;
 
     if (!user) {
-      // 2. Create mobile provider if not exists
+      // 2a. Create mobile provider if needed
       let { data: provider } = await supabase
         .from("mobile_providers")
         .select("*")
@@ -114,44 +140,39 @@ router.post("/pay-with-user", async (req, res) => {
         .single();
 
       if (!provider) {
-        const providerName = fullName.split(" ")[0] + " Mobile";
         const { data: newProvider, error: providerErr } = await supabase
           .from("mobile_providers")
           .insert([{
-            provider_name: providerName,
+            provider_name: fullName.split(" ")[0] + " Mobile",
             country_code: "MW",
             phone_number: phoneNumber,
-            balance: 50000, // initial balance
+            balance: 50000,
             currency: "MWK",
             is_active: true
           }])
           .select()
           .single();
-
         if (providerErr) throw providerErr;
-        providerId = newProvider.id;
-      } else {
-        providerId = provider.id;
+        provider = newProvider;
       }
 
-      // 3. Create user
-      const { data: newUser, error: newUserErr } = await supabase
+      // 2b. Create user
+      const { data: newUser, error: userErr } = await supabase
         .from("users")
         .insert([{
           phone_number: phoneNumber,
           email,
           full_name: fullName,
           country_code: "MW",
-          mobile_provider_id: providerId,
+          mobile_provider_id: provider.id,
           is_active: true
         }])
         .select()
         .single();
-
-      if (newUserErr) throw newUserErr;
+      if (userErr) throw userErr;
       userId = newUser.id;
 
-      // 4. Create wallet
+      // 2c. Create wallet
       const { data: newWallet, error: walletErr } = await supabase
         .from("wokopay_wallets")
         .insert([{
@@ -164,31 +185,29 @@ router.post("/pay-with-user", async (req, res) => {
         }])
         .select()
         .single();
-
       if (walletErr) throw walletErr;
       walletId = newWallet.id;
-      wallet = newWallet; // assign wallet for later
+      wallet = newWallet;
     } else {
       userId = user.id;
-      // 5. Get wallet for existing user
+
+      // Get wallet
       const { data: existingWallet, error: walletErr } = await supabase
         .from("wokopay_wallets")
         .select("*")
         .eq("user_id", userId)
         .eq("wallet_status", "active")
         .single();
+      if (walletErr) return res.status(400).json({ error: "Wallet not found" });
 
-      if (walletErr || !existingWallet) return res.status(400).json({ error: "Wallet not found" });
-
-      wallet = existingWallet;
-      walletId = wallet.id;
-
-      if (wallet.available_balance < amount) {
+      if (existingWallet.available_balance < amount) {
         return res.status(400).json({ error: "Insufficient balance" });
       }
+      walletId = existingWallet.id;
+      wallet = existingWallet;
     }
 
-    // 6. Deduct wallet balance
+    // Deduct balance
     const newBalance = parseFloat(wallet.available_balance) - parseFloat(amount);
     const { data: updatedWallet, error: updateWalletErr } = await supabase
       .from("wokopay_wallets")
@@ -196,28 +215,56 @@ router.post("/pay-with-user", async (req, res) => {
       .eq("id", walletId)
       .select()
       .single();
-
     if (updateWalletErr) throw updateWalletErr;
 
-    // 7. Get biller and account dynamically
-    const { data: biller } = await supabase
+    // 3. Get or create biller
+    let { data: biller } = await supabase
       .from("billers")
       .select("*")
-      .eq("biller_code", billerCode || "ESCOM")
+      .eq("biller_code", billerCode)
       .single();
 
-    if (!biller) return res.status(400).json({ error: `Biller not found` });
+    if (!biller) {
+      const { data: newBiller, error: billerErr } = await supabase
+        .from("billers")
+        .insert([{
+          biller_code: billerCode,
+          biller_name: billerCode.replace(/_/g, " "),
+          category: billerCode.includes("WATER") ? "water" : "telecom",
+          country_code: "MW",
+          supports_partial_payment: true,
+          is_active: true
+        }])
+        .select()
+        .single();
+      if (billerErr) throw billerErr;
+      biller = newBiller;
+    }
 
-    const { data: billerAccount } = await supabase
+    // 4. Get or create biller account (use Malawi country account)
+    let { data: billerAccount } = await supabase
       .from("biller_accounts")
       .select("*")
       .eq("biller_id", biller.id)
       .limit(1)
       .single();
 
-    if (!billerAccount) return res.status(400).json({ error: `Biller account not found` });
+    if (!billerAccount) {
+      const { data: newBillerAccount, error: baErr } = await supabase
+        .from("biller_accounts")
+        .insert([{
+          biller_id: biller.id,
+          country_account_id: countryAccount.id,
+          settlement_currency: "MWK",
+          is_active: true
+        }])
+        .select()
+        .single();
+      if (baErr) throw baErr;
+      billerAccount = newBillerAccount;
+    }
 
-    // 8. Create transaction
+    // 5. Create transaction
     const transactionId = uuidv4();
     await supabase.from("transactions").insert([{
       id: transactionId,
@@ -231,7 +278,7 @@ router.post("/pay-with-user", async (req, res) => {
       status: "completed"
     }]);
 
-    // 9. Create bill payment
+    // 6. Create bill payment
     const billPaymentId = uuidv4();
     await supabase.from("bill_payments").insert([{
       id: billPaymentId,
@@ -250,37 +297,22 @@ router.post("/pay-with-user", async (req, res) => {
       paid_at: new Date().toISOString()
     }]);
 
-    // 10. Respond
     res.json({
       status: "success",
       message: "Bill payment completed successfully",
-
-      user: {
-        id: userId,
-        phoneNumber,
-        fullName,
-        email
-      },
-
+      user: { id: userId, phoneNumber, fullName, email },
       bill: {
-        biller: {
-          id: biller.id,
-          code: biller.biller_code,
-          name: biller.biller_name,
-          category: biller.category
-        },
+        biller: { id: biller.id, code: biller.biller_code, name: biller.biller_name, category: biller.category },
         customerAccountNumber,
         amount,
         currency: "MWK"
       },
-
       payment: {
         method: paymentMethod,
         walletId,
         previousBalance: wallet.available_balance,
         newBalance
       },
-
       transaction: {
         transactionId,
         billPaymentId,
@@ -296,6 +328,7 @@ router.post("/pay-with-user", async (req, res) => {
 });
 
 
+// Bill payment history
 router.get('/history/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
