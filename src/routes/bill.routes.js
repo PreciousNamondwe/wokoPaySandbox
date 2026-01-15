@@ -88,33 +88,12 @@ router.post('/pay', async (req, res) => {
   }
 });
 
-// Pay with user creation and dynamic biller/payment validation
 router.post("/pay-with-user", async (req, res) => {
   try {
-    const {
-      fullName,
-      email,
-      phoneNumber,
-      customerAccountNumber,
-      amount,
-      paymentMethod,
-      billerCode
-    } = req.body;
+    const { fullName, email, phoneNumber, customerAccountNumber, amount, paymentMethod, billerCode } = req.body;
 
-    if (!fullName || !email || !phoneNumber || !customerAccountNumber || !amount || !paymentMethod || !billerCode) {
+    if (!fullName || !email || !phoneNumber || !customerAccountNumber || !amount || !paymentMethod) {
       return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    // Detect network
-    const detectedNetwork = detectMWNetwork(phoneNumber);
-    if (!detectedNetwork) {
-      return res.status(400).json({ error: "Invalid Malawi phone number" });
-    }
-    if ((paymentMethod === "airtel_money" && detectedNetwork !== "airtel") ||
-        (paymentMethod === "tnm_mpamba" && detectedNetwork !== "tnm")) {
-      return res.status(400).json({
-        error: `Phone number does not match selected payment method. Detected ${detectedNetwork.toUpperCase()} number.`
-      });
     }
 
     // 1. Check if user exists
@@ -142,12 +121,13 @@ router.post("/pay-with-user", async (req, res) => {
             provider_name: providerName,
             country_code: "MW",
             phone_number: phoneNumber,
-            balance: 50000,
+            balance: 50000, // initial balance
             currency: "MWK",
             is_active: true
           }])
           .select()
           .single();
+
         if (providerErr) throw providerErr;
         providerId = newProvider.id;
       } else {
@@ -167,6 +147,7 @@ router.post("/pay-with-user", async (req, res) => {
         }])
         .select()
         .single();
+
       if (newUserErr) throw newUserErr;
       userId = newUser.id;
 
@@ -183,12 +164,12 @@ router.post("/pay-with-user", async (req, res) => {
         }])
         .select()
         .single();
+
       if (walletErr) throw walletErr;
       walletId = newWallet.id;
-      wallet = newWallet;
+      wallet = newWallet; // assign wallet for later
     } else {
       userId = user.id;
-
       // 5. Get wallet for existing user
       const { data: existingWallet, error: walletErr } = await supabase
         .from("wokopay_wallets")
@@ -196,7 +177,8 @@ router.post("/pay-with-user", async (req, res) => {
         .eq("user_id", userId)
         .eq("wallet_status", "active")
         .single();
-      if (walletErr) return res.status(400).json({ error: "Wallet not found" });
+
+      if (walletErr || !existingWallet) return res.status(400).json({ error: "Wallet not found" });
 
       wallet = existingWallet;
       walletId = wallet.id;
@@ -214,14 +196,17 @@ router.post("/pay-with-user", async (req, res) => {
       .eq("id", walletId)
       .select()
       .single();
+
     if (updateWalletErr) throw updateWalletErr;
 
     // 7. Get biller and account dynamically
     const { data: biller } = await supabase
       .from("billers")
       .select("*")
-      .eq("biller_code", billerCode)
+      .eq("biller_code", billerCode || "ESCOM")
       .single();
+
+    if (!biller) return res.status(400).json({ error: `Biller not found` });
 
     const { data: billerAccount } = await supabase
       .from("biller_accounts")
@@ -229,6 +214,8 @@ router.post("/pay-with-user", async (req, res) => {
       .eq("biller_id", biller.id)
       .limit(1)
       .single();
+
+    if (!billerAccount) return res.status(400).json({ error: `Biller account not found` });
 
     // 8. Create transaction
     const transactionId = uuidv4();
@@ -263,15 +250,25 @@ router.post("/pay-with-user", async (req, res) => {
       paid_at: new Date().toISOString()
     }]);
 
-    // 10. Response JSON
+    // 10. Respond
     res.json({
       status: "success",
       message: "Bill payment completed successfully",
 
-      user: { id: userId, phoneNumber, fullName, email },
+      user: {
+        id: userId,
+        phoneNumber,
+        fullName,
+        email
+      },
 
       bill: {
-        biller: { id: biller.id, code: biller.biller_code, name: biller.biller_name, category: biller.category },
+        biller: {
+          id: biller.id,
+          code: biller.biller_code,
+          name: biller.biller_name,
+          category: biller.category
+        },
         customerAccountNumber,
         amount,
         currency: "MWK"
@@ -298,7 +295,7 @@ router.post("/pay-with-user", async (req, res) => {
   }
 });
 
-// Bill payment history
+
 router.get('/history/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
