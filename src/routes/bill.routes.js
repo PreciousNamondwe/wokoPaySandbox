@@ -233,14 +233,43 @@ router.post("/pay-with-user", async (req, res) => {
       paid_at: new Date().toISOString()
     }]);
 
-    res.json({
-      status: "success",
-      userId,
-      walletId,
-      transactionId,
-      billPaymentId,
-      message: `Bill payment of MWK ${amount} for ${customerAccountNumber} completed`
-    });
+   res.json({
+  status: "success",
+  message: "Bill payment completed successfully",
+
+  user: {
+    id: userId,
+    phoneNumber,
+    fullName,
+    email
+  },
+
+  bill: {
+    biller: {
+      id: biller.id,
+      code: biller.biller_code,
+      name: biller.biller_name,
+      category: biller.category
+    },
+    customerAccountNumber,
+    amount,
+    currency: "MWK"
+  },
+
+  payment: {
+    method: paymentMethod,
+    walletId,
+    previousBalance: wallet.available_balance,
+    newBalance
+  },
+
+  transaction: {
+    transactionId,
+    billPaymentId,
+    status: "paid",
+    paidAt: new Date().toISOString()
+  }
+});
 
   } catch (err) {
     console.error(err);
